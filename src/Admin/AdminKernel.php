@@ -6,6 +6,8 @@ namespace GroceryRestable\Admin;
 
 use GroceryRestable\Auth\AuthContext;
 use GroceryRestable\Auth\Authenticator;
+use GroceryRestable\Auth\PasswordHasher;
+use GroceryRestable\Auth\UserAuth;
 use GroceryRestable\Database\ConnectionFactory;
 use GroceryRestable\Database\ConnectionManager;
 use GroceryRestable\Database\Grammar\Grammar;
@@ -442,6 +444,9 @@ final class AdminKernel
         if (in_array('*', (array) $store->setting('cors_origins', []), true)) {
             $warnings[] = 'CORS allows every origin ("*").';
         }
+        if ($this->api->auth()->isEnabled() && ! in_array($store->setting('auth_mode'), ['jwt', 'any'], true)) {
+            $warnings[] = 'User login is enabled but the authentication mode does not accept user tokens: /auth answers 400.';
+        }
 
         return [
             'user' => ['id' => $user['id'], 'username' => $user['username']],
@@ -454,6 +459,8 @@ final class AdminKernel
             'permissions' => Resource::PERMISSIONS,
             'operations' => Resource::OPERATIONS,
             'authModes' => Authenticator::MODES,
+            'passwordAlgorithms' => PasswordHasher::availableAlgorithms(),
+            'legacyDigests' => array_keys(PasswordHasher::LEGACY),
             'idGenerators' => Uuid::GENERATORS,
             'logPath' => $this->api->config()->logPath(),
             'trashPath' => $this->api->janitor()->trashRoot(),
@@ -976,12 +983,110 @@ final class AdminKernel
     {
         $settings = $this->api->store()->settings();
         foreach (ConfigStore::SECRET_SETTINGS as $secret) {
-            $settings[$secret . '_set'] = ($settings[$secret] ?? '') !== '' || (string) $this->api->config()->get('jwtSecret', '') !== '';
+            $settings[$secret . '_set'] = ($settings[$secret] ?? '') !== '' || ($secret === 'jwt_secret' && (string) $this->api->config()->get('jwtSecret', '') !== '');
             unset($settings[$secret]);
         }
         $settings['jwt_secret_from_config'] = (string) $this->api->config()->get('jwtSecret', '') !== '';
 
         return $settings;
+    }
+
+    /**
+     * Normalize and validate the user login settings (auth_*), checking the users table when login is enabled.
+     *
+     * @param array<string, mixed> $values
+     * @return array<string, mixed>
+     */
+    private function userAuthSettings(array $values): array
+    {
+        $store = $this->api->store();
+        if (array_key_exists('auth_google_client_secret', $values) && ($values['auth_google_client_secret'] === '' || $values['auth_google_client_secret'] === null)) {
+            unset($values['auth_google_client_secret']); // empty means "keep the current secret"
+        }
+        if (isset($values['auth_token_strategy']) && ! in_array($values['auth_token_strategy'], UserAuth::STRATEGIES, true)) {
+            throw ValidationException::forField('auth_token_strategy', 'Use jwt or session.');
+        }
+        if (isset($values['auth_password_algorithm']) && ! in_array($values['auth_password_algorithm'], PasswordHasher::availableAlgorithms(), true)) {
+            throw ValidationException::forField('auth_password_algorithm', 'This algorithm is not available on this server.');
+        }
+        $ranges = [
+            'auth_access_ttl' => [60, 86400], 'auth_session_ttl' => [300, 31536000], 'auth_password_cost' => [10, 15],
+            'auth_password_memory' => [19456, 1048576], 'auth_password_time' => [2, 10], 'auth_max_attempts' => [0, 1000],
+            'auth_max_attempts_ip' => [0, 10000], 'auth_attempts_window' => [60, 86400],
+        ];
+        foreach ($ranges as $key => [$min, $max]) {
+            if (isset($values[$key])) {
+                $values[$key] = max($min, min($max, (int) $values[$key]));
+            }
+        }
+        foreach (['auth_password_enabled', 'auth_google_enabled', 'auth_password_rehash', 'auth_google_link_by_email', 'auth_google_signup'] as $bool) {
+            if (array_key_exists($bool, $values)) {
+                $values[$bool] = filter_var($values[$bool], FILTER_VALIDATE_BOOLEAN);
+            }
+        }
+        foreach (['auth_users_identity_columns', 'auth_users_claim_columns', 'auth_users_hidden_columns', 'auth_google_client_ids', 'auth_google_hosted_domains', 'auth_password_legacy'] as $list) {
+            if (isset($values[$list]) && is_string($values[$list])) {
+                $values[$list] = array_values(array_filter(array_map('trim', preg_split('/[\s,]+/', $values[$list]) ?: [])));
+            }
+        }
+        if (isset($values['auth_password_legacy'])) {
+            $values['auth_password_legacy'] = array_values(array_intersect((array) $values['auth_password_legacy'], array_keys(PasswordHasher::LEGACY)));
+        }
+        if (isset($values['auth_google_signup_fields']) && is_string($values['auth_google_signup_fields'])) {
+            // "name=name, avatar=picture" (column=claim)
+            $fields = [];
+            foreach (array_filter(array_map('trim', explode(',', $values['auth_google_signup_fields']))) as $pair) {
+                [$column, $claim] = array_map('trim', explode('=', $pair, 2)) + [1 => ''];
+                if ($column === '' || $claim === '') {
+                    throw ValidationException::forField('auth_google_signup_fields', 'Write column=claim pairs, e.g. name=name, avatar=picture.');
+                }
+                $fields[$column] = $claim;
+            }
+            $values['auth_google_signup_fields'] = $fields;
+        }
+
+        // Other settings pages never fail because of the users table.
+        $touchesLogin = array_filter(array_keys($values), static fn (string $k): bool => str_starts_with($k, 'auth_') && $k !== 'auth_mode') !== [];
+        $merged = $values + $store->settings();
+        if (! $touchesLogin || (! $merged['auth_password_enabled'] && ! $merged['auth_google_enabled'])) {
+            return $values;
+        }
+        if ($merged['auth_google_enabled'] && (array) $merged['auth_google_client_ids'] === []) {
+            throw ValidationException::forField('auth_google_client_ids', 'Google sign-in needs at least one OAuth client id.');
+        }
+        $table = $this->api->schema()->find((string) $merged['auth_users_table'], (string) $merged['auth_users_connection'] ?: null);
+        if ($table === null) {
+            throw ValidationException::forField('auth_users_table', 'Table "' . $merged['auth_users_table'] . '" not found.');
+        }
+        $columns = [
+            'auth_users_id_column' => [$merged['auth_users_id_column']],
+            'auth_users_password_column' => [$merged['auth_users_password_column']],
+            'auth_users_identity_columns' => (array) $merged['auth_users_identity_columns'],
+            'auth_users_role_column' => array_filter([$merged['auth_users_role_column']]),
+            'auth_users_active_column' => array_filter([$merged['auth_users_active_column']]),
+            'auth_users_claim_columns' => (array) $merged['auth_users_claim_columns'],
+        ];
+        if ($merged['auth_google_enabled']) {
+            $columns['auth_google_email_column'] = array_filter([$merged['auth_google_email_column']]);
+            $columns['auth_google_id_column'] = array_filter([$merged['auth_google_id_column']]);
+            $columns['auth_google_signup_fields'] = array_keys((array) $merged['auth_google_signup_fields']);
+        }
+        foreach ($columns as $key => $names) {
+            if ($names === [] && in_array($key, ['auth_users_id_column', 'auth_users_password_column', 'auth_users_identity_columns'], true)) {
+                throw ValidationException::forField($key, 'Required.');
+            }
+            foreach ($names as $name) {
+                if (! $table->hasColumn((string) $name)) {
+                    throw ValidationException::forField($key, 'Column "' . $name . '" not found in "' . $table->name . '".');
+                }
+            }
+        }
+        // The default "jwt" strategy needs a secret: create one instead of failing at the first login.
+        if ($merged['auth_token_strategy'] === 'jwt' && (string) ($merged['jwt_secret'] ?? '') === '' && (string) $this->api->config()->get('jwtSecret', '') === '') {
+            $values['jwt_secret'] = bin2hex(random_bytes(32));
+        }
+
+        return $values;
     }
 
     /**
@@ -1034,6 +1139,7 @@ final class AdminKernel
             $resource = (new Resource('validation', 'validation'))->setPermissions((array) $values['default_permissions']);
             $values['default_permissions'] = $resource->getPermissions();
         }
+        $values = $this->userAuthSettings($values);
 
         $this->api->store()->saveSettings($values);
         $this->api->store()->clearCache();

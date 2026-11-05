@@ -6,7 +6,7 @@
 (function (GR, $) {
     'use strict';
 
-    const { esc, icon, badge, sourceBadge, panel } = GR.html;
+    const { esc, icon, badge, sourceBadge, panel, codeBlock } = GR.html;
     const { absoluteApiUrl, formValues, formatBytes } = GR.util;
     const { api } = GR.http;
     const { toast, fail, drawer, confirmDialog, download } = GR.ui;
@@ -17,7 +17,7 @@
 
     const MENU = [
         { group: 'Application', items: [['account', 'My account', 'circle-user'], ['application', 'General', 'circle-info'], ['connections', 'Database connections', 'database'], ['admins', 'Admin users', 'users']] },
-        { group: 'API', items: [['api', 'API behaviour', 'table-list'], ['auth', 'Authentication', 'shield-halved'], ['ratelimit', 'Rate limiting', 'gauge-high'], ['cors', 'CORS', 'globe'], ['uploads', 'Uploads', 'upload']] },
+        { group: 'API', items: [['api', 'API behaviour', 'table-list'], ['auth', 'Authentication', 'shield-halved'], ['login', 'User login', 'right-to-bracket'], ['ratelimit', 'Rate limiting', 'gauge-high'], ['cors', 'CORS', 'globe'], ['uploads', 'Uploads', 'upload']] },
         { group: 'Maintenance', items: [['logging', 'Logging', 'list-ul'], ['cleanup', 'Storage cleanup', 'broom'], ['io', 'Export / Import', 'right-left']] },
     ];
     const titleOf = (page) => MENU.flatMap((g) => g.items).find(([key]) => key === page);
@@ -89,7 +89,7 @@
 
         auth(s) {
             const ops = store.boot.permissions;
-            const modes = [['api_key', 'API keys'], ['any', 'API keys + JWT'], ['jwt', 'JWT only'], ['none', 'None (open API - development only)']];
+            const modes = [['api_key', 'API keys'], ['any', 'API keys + user tokens (JWT, sessions)'], ['jwt', 'User tokens only (JWT, sessions)'], ['none', 'None (open API - development only)']];
             settingsForm(panel(`${icon('shield-halved')} Authentication`, `<div class="mb-2"><label class="form-label small mb-0" for="s-auth_mode">Mode</label><select class="form-select form-select-sm" id="s-auth_mode" name="auth_mode">
                     ${modes.map(([v, l]) => `<option value="${v}" ${s.auth_mode === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
                 ${switchField(s, 'allow_query_apikey', 'Accept ?apikey= in the query string', 'Convenient for &lt;img src&gt; but keys end up in server logs.')}
@@ -114,6 +114,71 @@
                         $form.find('[name=jwt_secret]').attr('type', 'text').val(Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')).trigger('input');
                     });
                 },
+            });
+        },
+
+        login(s) {
+            const b = store.boot;
+            const option = (value, label, current) => `<option value="${esc(value)}" ${current === value ? 'selected' : ''}>${esc(label)}</option>`;
+            const select = (name, label, options, help = '') => `<div class="mb-2"><label class="form-label small mb-0" for="s-${name}">${label}</label>
+                <select class="form-select form-select-sm" id="s-${name}" name="${name}">${options.map(([v, l]) => option(v, l, s[name])).join('')}</select>${help ? `<div class="gr-help">${help}</div>` : ''}</div>`;
+            const signupFields = Object.entries(s.auth_google_signup_fields || {}).map(([c, v]) => `${c}=${v}`).join(', ');
+            const tokensOk = ['jwt', 'any'].includes(s.auth_mode);
+            const base = absoluteApiUrl();
+            const sample = `import GroceryRestable from '${base}/sdk.js';
+
+const gr = new GroceryRestable('${base}', { apiKey: 'YOUR_ANON_KEY' });
+
+// password login: tokens are stored and refreshed by the SDK
+const { user } = await gr.auth.login('jane@example.com', 'secret');
+
+// Google: the "credential" of Sign in with Google (or { code } of the popup code flow)
+await gr.auth.loginWithGoogle({ idToken: response.credential });
+
+await gr.collection('notes').getList();   // runs as the signed in user
+await gr.auth.logout();`;
+
+            settingsForm(panel(`${icon('right-to-bracket')} User login`, `<p class="gr-help">Sign users of <b>your own users table</b> in through the API and get tokens that work with permissions and
+                    <code>scope()</code> like any other JWT. Endpoints: <code>POST /auth/login</code>, <code>POST /auth/google</code>, <code>POST /auth/refresh</code>,
+                    <code>POST /auth/logout</code>, <code>GET /auth/me</code>, <code>GET /auth</code>.</p>
+                ${tokensOk ? '' : `<div class="alert alert-warning py-1 small">The authentication mode does not accept user tokens. Set it to "API keys + user tokens" in <a href="#/settings/auth">Authentication</a>.</div>`}
+                ${switchField(s, 'auth_password_enabled', 'Password login', 'Identity (email, username...) and password, checked against the users table.')}
+                ${switchField(s, 'auth_google_enabled', 'Sign in with Google', 'Google ID tokens are verified on the server (signature, audience, expiry).')}`)
+                + panel(`${icon('table')} Users table`, `<div class="row g-2"><div class="col">${select('auth_users_connection', 'Connection', [['', 'Default connection'], ...b.connections.map((c) => [c.name, c.name])])}</div>
+                    <div class="col">${inputField(s, 'auth_users_table', 'Table')}</div></div>
+                    <div class="row g-2"><div class="col">${inputField(s, 'auth_users_id_column', 'Id column', 'Becomes the "sub" claim / $auth->userId().')}</div><div class="col">${inputField(s, 'auth_users_password_column', 'Password hash column')}</div></div>
+                    ${inputField(s, 'auth_users_identity_columns', 'Identity columns', 'Comma separated, tried in order, e.g. email, username. Text columns are compared case-insensitively.')}
+                    <div class="row g-2"><div class="col">${inputField(s, 'auth_users_role_column', 'Role column', `Optional. Empty = the default JWT role (${esc(s.jwt_default_role || 'authenticated')}). service_role is refused.`)}</div>
+                    <div class="col">${inputField(s, 'auth_users_active_column', 'Active column', 'Optional. 0 / false / empty = login refused.')}</div></div>
+                    <div class="row g-2"><div class="col">${inputField(s, 'auth_users_claim_columns', 'Columns copied into the token', 'e.g. tenant_id, read with $auth->claim(\'tenant_id\').')}</div>
+                    <div class="col">${inputField(s, 'auth_users_hidden_columns', 'Columns never returned', 'The password column never is.')}</div></div>`)
+                + panel(`${icon('key')} Tokens`, `${select('auth_token_strategy', 'Strategy', [['jwt', 'JWT + rotating refresh token (stateless, scales horizontally)'], ['session', 'Session token (server side, revoked instantly)']],
+                    'JWT: short lived access token, refresh tokens are rotated and a reused one revokes the session. Session: one opaque token, checked on every request.')}
+                    <div class="row g-2"><div class="col">${inputField(s, 'auth_access_ttl', 'Access token lifetime (s)', 'JWT strategy, 60 to 86400. Default 900 (15 min).', 'number')}</div>
+                    <div class="col">${inputField(s, 'auth_session_ttl', 'Session / refresh token lifetime (s)', 'Absolute, from the login. Default 30 days.', 'number')}</div></div>`)
+                + panel(`${icon('fingerprint')} Password hashing`, `${select('auth_password_algorithm', 'Algorithm for new hashes', b.passwordAlgorithms.map((a) => [a, a + (a === 'argon2id' ? ' (recommended)' : '')]),
+                    'Standard password_hash() formats: compatible with CodeIgniter Shield, Laravel and password_verify(). Also used by "password" fields of endpoints.')}
+                    <div class="row g-2"><div class="col">${inputField(s, 'auth_password_cost', 'bcrypt cost', '10 to 15', 'number')}</div>
+                    <div class="col">${inputField(s, 'auth_password_memory', 'argon2 memory (KiB)', 'min 19456', 'number')}</div><div class="col">${inputField(s, 'auth_password_time', 'argon2 iterations', '2 to 10', 'number')}</div></div>
+                    ${switchField(s, 'auth_password_rehash', 'Rehash on login', 'Upgrades older algorithms, weaker parameters and legacy digests to the settings above.')}
+                    <label class="form-label small mb-0">Legacy digests (verify only, for migrating old tables)</label>
+                    <div class="mb-1">${b.legacyDigests.map((d) => `<div class="form-check form-check-inline"><input class="form-check-input" type="checkbox" id="s-legacy-${d}" data-legacy="${d}" ${(s.auth_password_legacy || []).includes(d) ? 'checked' : ''}>
+                        <label class="form-check-label small" for="s-legacy-${d}">${d}</label></div>`).join('')}</div>
+                    <div class="gr-help">Unsalted hex digests are weak: enable them only while migrating, users are rehashed at their next login.</div>`)
+                + panel(`${icon('user-shield')} Brute force protection`, `<div class="row g-2"><div class="col">${inputField(s, 'auth_max_attempts', 'Failures per account', '0 = no limit', 'number')}</div>
+                    <div class="col">${inputField(s, 'auth_max_attempts_ip', 'Failures per IP', '0 = no limit', 'number')}</div><div class="col">${inputField(s, 'auth_attempts_window', 'Window (s)', '', 'number')}</div></div>
+                    <div class="gr-help">Over the limit, logins answer 429 with Retry-After, even with the right password.</div>`)
+                + panel('<i class="fa-brands fa-google"></i> Google', `${inputField(s, 'auth_google_client_ids', 'OAuth client ids', 'Comma separated (web, Android, iOS). The first one is the web client.')}
+                    <div class="mb-2"><label class="form-label small mb-0" for="s-auth_google_client_secret">Client secret ${s.auth_google_client_secret_set ? badge('set', 'success') : badge('not set', 'secondary')}</label>
+                    <input type="password" class="form-control form-control-sm" id="s-auth_google_client_secret" name="auth_google_client_secret" autocomplete="new-password" placeholder="${s.auth_google_client_secret_set ? 'leave empty to keep the current secret' : 'only needed for authorization codes'}">
+                    <div class="gr-help">Not needed for ID tokens (Sign in with Google button, One Tap, mobile SDKs).</div></div>
+                    <div class="row g-2"><div class="col">${inputField(s, 'auth_google_id_column', 'Google id column', 'Stores the Google "sub". Recommended.')}</div><div class="col">${inputField(s, 'auth_google_email_column', 'Email column')}</div></div>
+                    ${switchField(s, 'auth_google_link_by_email', 'Link to an existing user with the same verified email')}
+                    ${switchField(s, 'auth_google_signup', 'Create a user on the first Google sign-in')}
+                    ${inputField({ auth_google_signup_fields: signupFields }, 'auth_google_signup_fields', 'Columns of new users', 'column=claim pairs, e.g. name=name, avatar=picture (claims: name, given_name, family_name, picture, locale).')}
+                    ${inputField(s, 'auth_google_hosted_domains', 'Allowed Google Workspace domains', 'Comma separated, empty = any Google account.')}`)
+                + panel(`${icon('code')} Usage`, codeBlock(sample, 'javascript', 'mb-0')), {
+                beforeSave: (v, $form) => ({ ...v, auth_password_legacy: $form.find('[data-legacy]:checked').map(function () { return this.dataset.legacy; }).get() }),
             });
         },
 

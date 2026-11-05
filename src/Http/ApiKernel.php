@@ -44,6 +44,8 @@ use Throwable;
  *   POST   /{resource}/{id}/actions/{name}    custom action
  *   *      /storage[/{bucket}[/{path}]]       storage buckets
  *   *      /rpc/{function}                    remote procedures
+ *   GET    /auth                              sign-in methods
+ *   POST   /auth/login | google | refresh | logout,  GET /auth/me    user login (UserAuth)
  */
 final class ApiKernel
 {
@@ -88,7 +90,7 @@ final class ApiKernel
         $internal = $auth !== null; // admin console and tests act as a given caller
         $target = null;
         try {
-            $auth ??= $this->authenticate($request);
+            $auth ??= $this->isSignInRoute($request, $resource) ? $this->authenticateOrAnonymous($request) : $this->authenticate($request);
             $target = $resource ?? $this->targetResource($request);
             if (! $internal) {
                 $this->rateLimit($request, $auth, $target);
@@ -121,6 +123,25 @@ final class ApiKernel
         } catch (ApiException $e) {
             $this->rateLimit($request, AuthContext::anonymous(), null);
             throw $e;
+        }
+    }
+
+    /**
+     * Sign-in endpoints work with a stale or invalid token in the request (a client signing in again).
+     */
+    private function isSignInRoute(Request $request, ?Resource $resource): bool
+    {
+        $segments = $request->segments();
+
+        return $resource === null && ($segments[0] ?? null) === 'auth' && in_array($segments[1] ?? '', ['', 'login', 'google', 'refresh'], true);
+    }
+
+    private function authenticateOrAnonymous(Request $request): AuthContext
+    {
+        try {
+            return $this->authenticate($request);
+        } catch (ApiException) {
+            return AuthContext::anonymous();
         }
     }
 
@@ -228,6 +249,10 @@ final class ApiKernel
 
             case 'storage':
                 return $this->storageRoute(array_slice($segments, 1), $request, $auth);
+
+            case 'auth':
+                // Tokens and user data must never be cached by browsers or proxies.
+                return $this->authRoute(array_slice($segments, 1), $request, $auth)->withHeader('Cache-Control', 'no-store');
 
             case 'rpc':
                 if (count($segments) !== 2) {
@@ -464,6 +489,47 @@ final class ApiKernel
         }
 
         return $this->toResponse(($function['callback'])($params, new ActionContext($auth, $request, $this->api->connections()->get($function['connection'] ?? null))));
+    }
+
+    /**
+     * User login (see UserAuth).
+     *
+     * @param list<string> $rest
+     */
+    private function authRoute(array $rest, Request $request, AuthContext $auth): Response
+    {
+        $users = $this->api->auth();
+        $method = $request->method();
+
+        switch (implode('/', $rest)) {
+            case '':
+                $this->allowMethods($method, ['GET']);
+
+                return Response::json($users->methods());
+            case 'login':
+                $this->allowMethods($method, ['POST']);
+
+                return Response::json($users->login($request));
+            case 'google':
+                $this->allowMethods($method, ['POST']);
+
+                return Response::json($users->google($request));
+            case 'refresh':
+                $this->allowMethods($method, ['POST']);
+
+                return Response::json($users->refresh($request));
+            case 'logout':
+                $this->allowMethods($method, ['POST']);
+                $users->logout($request, $auth);
+
+                return Response::noContent();
+            case 'me':
+                $this->allowMethods($method, ['GET']);
+
+                return Response::json($users->me($auth));
+        }
+
+        throw ApiException::notFound();
     }
 
     /**
@@ -770,6 +836,9 @@ final class ApiKernel
         $response = Response::json($payload, $status);
         if ($status === 401) {
             $response = $response->withHeader('WWW-Authenticate', 'Bearer realm="grocery-restable"');
+        }
+        if ($status === 429 && is_int($details['retry_after'] ?? null)) {
+            $response = $response->withHeader('Retry-After', (string) $details['retry_after']);
         }
 
         return $response;

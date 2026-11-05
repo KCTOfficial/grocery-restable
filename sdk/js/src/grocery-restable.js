@@ -135,23 +135,27 @@ function toBody(data) {
 }
 
 // =====================================================================
-// Auth store: the user's JWT (from your own login or identity provider)
+// Auth store: the user's token (from gr.auth, your own login or an identity provider)
 // =====================================================================
 
 export class AuthStore {
     constructor() {
         this.token = '';
+        /** Refresh token of the "jwt" strategy (gr.auth renews the access token with it). */
+        this.refreshToken = '';
+        /** The signed in user returned by /auth. */
+        this.user = null;
         this.listeners = [];
     }
 
-    /** True when a token is set and not expired (based on its "exp" claim). */
+    /** True when a token is set and not expired (based on its "exp" claim; session tokens have none). */
     get isValid() {
         if (!this.token) return false;
         const payload = this.payload;
         return !payload || !payload.exp || payload.exp * 1000 > Date.now();
     }
 
-    /** Decoded JWT payload (not verified, the server verifies it). */
+    /** Decoded JWT payload (not verified, the server verifies it). Null for session tokens. */
     get payload() {
         try {
             const part = this.token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
@@ -161,19 +165,145 @@ export class AuthStore {
         }
     }
 
-    save(token) {
+    /**
+     * @param {string} token
+     * @param {{refreshToken?: string, user?: object|null}} [extra]
+     */
+    save(token, extra = {}) {
         this.token = token || '';
-        this.listeners.forEach((listener) => listener(this.token));
+        this.refreshToken = this.token ? extra.refreshToken || '' : '';
+        this.user = this.token ? extra.user ?? null : null;
+        this.listeners.forEach((listener) => listener(this.token, this.user));
     }
 
     clear() {
         this.save('');
     }
 
-    /** Subscribe to token changes; returns an unsubscribe function. */
+    /** Subscribe to changes: listener(token, user). Returns an unsubscribe function. */
     onChange(listener) {
         this.listeners.push(listener);
         return () => { this.listeners = this.listeners.filter((l) => l !== listener); };
+    }
+}
+
+/**
+ * Auth store persisted in localStorage (browsers), shared by the tabs of the same origin.
+ * Tokens in localStorage are readable by any script of the page: keep a strict Content-Security-Policy.
+ */
+export class LocalAuthStore extends AuthStore {
+    constructor(key = 'gr_auth') {
+        super();
+        this.storageKey = key;
+        this.load();
+        if (typeof window !== 'undefined' && window.addEventListener) {
+            window.addEventListener('storage', (e) => { if (e.key === this.storageKey) this.load(true); });
+        }
+    }
+
+    load(notify = false) {
+        let data = {};
+        try { data = JSON.parse(globalThis.localStorage.getItem(this.storageKey) || '{}') || {}; } catch (e) { data = {}; }
+        this.token = data.token || '';
+        this.refreshToken = data.refreshToken || '';
+        this.user = data.user ?? null;
+        if (notify) this.listeners.forEach((listener) => listener(this.token, this.user));
+    }
+
+    save(token, extra = {}) {
+        super.save(token, extra);
+        try {
+            if (this.token) globalThis.localStorage.setItem(this.storageKey, JSON.stringify({ token: this.token, refreshToken: this.refreshToken, user: this.user }));
+            else globalThis.localStorage.removeItem(this.storageKey);
+        } catch (e) { /* storage unavailable (private mode): keep the tokens in memory */ }
+    }
+}
+
+// =====================================================================
+// User login (/auth)
+// =====================================================================
+
+export class AuthService {
+    /** @param {GroceryRestable} client */
+    constructor(client) {
+        this.client = client;
+        this.refreshing = null;
+    }
+
+    /** The signed in user (from the last login / refresh), or null. */
+    get user() {
+        return this.client.authStore.user;
+    }
+
+    get isSignedIn() {
+        return Boolean(this.client.authStore.token);
+    }
+
+    /** Enabled sign-in methods: { password, google: { client_id } | false, strategy }. */
+    methods(options = {}) {
+        return this.client.send('/auth', { ...options, noToken: true });
+    }
+
+    /** Sign in with an identity (email, username...) and a password. Stores the tokens. */
+    async login(identity, password, options = {}) {
+        return this.store(await this.client.send('/auth/login', { ...options, method: 'POST', body: { identity, password }, noToken: true }));
+    }
+
+    /**
+     * Sign in with Google: { idToken } (the "credential" of Sign in with Google / One Tap / mobile SDKs)
+     * or { code, redirectUri?, codeVerifier? } (authorization code flow).
+     */
+    async loginWithGoogle({ idToken, credential, code, redirectUri, codeVerifier } = {}, options = {}) {
+        const body = (idToken || credential)
+            ? { id_token: idToken || credential }
+            : { code, redirect_uri: redirectUri, code_verifier: codeVerifier };
+        return this.store(await this.client.send('/auth/google', { ...options, method: 'POST', body, noToken: true }));
+    }
+
+    /** New access token (and rotated refresh token). Parallel calls share one request. */
+    refresh(options = {}) {
+        const refreshToken = this.client.authStore.refreshToken;
+        if (!refreshToken) return Promise.reject(new GroceryRestableError('Not signed in.', { status: 401, code: 'unauthorized' }));
+        if (!this.refreshing) {
+            this.refreshing = this.client.send('/auth/refresh', { ...options, method: 'POST', body: { refresh_token: refreshToken }, noToken: true })
+                .then((data) => this.store(data))
+                .catch((error) => {
+                    if (error.status === 401 || error.status === 403) this.client.authStore.clear();
+                    throw error;
+                })
+                .finally(() => { this.refreshing = null; });
+        }
+        return this.refreshing;
+    }
+
+    /** Sign out (all: on every device). The local tokens are cleared even when the request fails. */
+    async logout({ all = false, ...options } = {}) {
+        const { token, refreshToken } = this.client.authStore;
+        try {
+            if (token || refreshToken) {
+                // The refresh token identifies the session even when the access token has expired.
+                const body = refreshToken ? { refresh_token: refreshToken, all } : { all };
+                await this.client.send('/auth/logout', { ...options, method: 'POST', body, noRefresh: true, noToken: Boolean(refreshToken) });
+            }
+        } catch (error) {
+            if (error.status !== 401) throw error;
+        } finally {
+            this.client.authStore.clear();
+        }
+        return true;
+    }
+
+    /** The signed in user, read again from the server. */
+    async me(options = {}) {
+        const user = await this.client.send('/auth/me', options);
+        const store = this.client.authStore;
+        store.save(store.token, { refreshToken: store.refreshToken, user });
+        return user;
+    }
+
+    store(data) {
+        this.client.authStore.save(data.access_token, { refreshToken: data.refresh_token, user: data.user });
+        return data;
     }
 }
 
@@ -416,6 +546,8 @@ export default class GroceryRestable {
         /** Hook: (response, data) => data, called after every successful request. */
         this.afterSend = null;
         this.collections = new Map();
+        /** User login: gr.auth.login(), loginWithGoogle(), refresh(), logout(), me(). */
+        this.auth = new AuthService(this);
     }
 
     /** A resource of the API (PocketBase calls them collections). */
@@ -463,6 +595,12 @@ export default class GroceryRestable {
         return this;
     }
 
+    /** Whether the stored access token is usable for at least 10 more seconds (session tokens always are). */
+    tokenFresh() {
+        const payload = this.authStore.payload;
+        return !payload || !payload.exp || payload.exp * 1000 > Date.now() + 10000;
+    }
+
     /**
      * @param {string} path
      * @param {object|Array<[string,string]>} [query]
@@ -475,13 +613,22 @@ export default class GroceryRestable {
 
     /**
      * Send any request to the API. Resolves with the parsed JSON (or Blob / text / null).
-     * Options: method, query, body, headers, prefer, signal, as ('json' | 'blob' | 'text'), raw.
+     * Options: method, query, body, headers, prefer, signal, as ('json' | 'blob' | 'text'), raw,
+     * noToken (do not send the user token), noRefresh (do not renew an expired token first).
+     * With a refresh token (gr.auth), an expired access token is renewed before the request,
+     * and a 401 answer is retried once after a refresh.
      */
     async send(path, options = {}) {
+        const store = this.authStore;
+        const canRefresh = !options.noToken && !options.noRefresh && store.refreshToken;
+        if (canRefresh && !this.tokenFresh()) {
+            try { await this.auth.refresh(); } catch (error) { /* continue without a valid token */ }
+        }
+
         let url = this.buildUrl(path, options.query || []);
         const headers = { ...this.headers, ...(options.headers || {}) };
         if (this.apiKey) headers.apikey = this.apiKey;
-        if (this.authStore.token) headers.Authorization = 'Bearer ' + this.authStore.token;
+        if (store.token && !options.noToken) headers.Authorization = 'Bearer ' + store.token;
         if (options.prefer) headers.Prefer = options.prefer;
 
         let body = options.body;
@@ -509,6 +656,12 @@ export default class GroceryRestable {
             if (options.as === 'blob' && response.ok) data = await response.blob();
             else if (options.as === 'text' || !type.includes('json')) data = await response.text();
             else data = await response.json().catch(() => null);
+        }
+        if (response.status === 401 && canRefresh && !options.retried && !isFormData(options.body)) {
+            try {
+                await this.auth.refresh();
+                return this.send(path, { ...options, retried: true });
+            } catch (error) { /* report the original 401 */ }
         }
         if (!response.ok) {
             const error = (data && data.error) || {};

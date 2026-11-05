@@ -89,6 +89,25 @@ Edited in the GUI's **Settings** area (one page per topic: API behaviour, Authen
 | `storage_auto_cleanup` | `true` | Daily storage housekeeping (stale metadata, untracked files, interrupted uploads, empty folders, expired trash). See [Orphan files and cleanup](uploads-and-storage.md#orphan-files-and-cleanup). |
 | `orphan_min_age_hours` | `24` | Files younger than this are never treated as orphans. |
 | `storage_trash_days` | `7` | Days cleaned files stay in `{storagePath}/trash` (`0` = delete immediately). |
+| `auth_password_enabled` / `auth_google_enabled` | `false` | [User login](authentication.md#user-login) with a password / with Google. |
+| `auth_users_connection`, `auth_users_table` | `''` (default connection), `users` | Where the users live. |
+| `auth_users_id_column`, `auth_users_password_column` | `id`, `password` | Id (token `sub`) and password hash columns. |
+| `auth_users_identity_columns` | `['email']` | Columns matched by the login identity, in order. |
+| `auth_users_role_column`, `auth_users_active_column` | `''` | Optional role and "active" columns. |
+| `auth_users_claim_columns`, `auth_users_hidden_columns` | `[]` | Columns copied into tokens / never returned. |
+| `auth_token_strategy` | `jwt` | `jwt` (JWT + rotating refresh token) or `session` (opaque revocable token). |
+| `auth_access_ttl` / `auth_session_ttl` | `900` / `2592000` | Access JWT lifetime / refresh token or session lifetime (seconds). |
+| `auth_password_algorithm` | `argon2id` | `argon2id`, `argon2i` or `bcrypt` for new hashes. |
+| `auth_password_cost` / `auth_password_memory` / `auth_password_time` | `12` / `65536` / `4` | bcrypt cost, argon2 memory (KiB) and iterations. |
+| `auth_password_legacy` | `[]` | Verify-only `md5`, `sha1`, `sha256`, `sha512` digests (migration). |
+| `auth_password_rehash` | `true` | Rehash outdated hashes after a successful login. |
+| `auth_max_attempts` / `auth_max_attempts_ip` / `auth_attempts_window` | `5` / `20` / `900` | Failed logins per account / IP within the window (`0` = no limit). |
+| `auth_google_client_ids` | `[]` | Accepted Google OAuth client ids (audience). |
+| `auth_google_client_secret` | `''` | Encrypted at rest; only for authorization codes. |
+| `auth_google_id_column` / `auth_google_email_column` | `google_id` / `email` | Google `sub` and email columns. |
+| `auth_google_link_by_email` / `auth_google_signup` | `true` / `false` | Link existing users by verified email / create users on first sign-in. |
+| `auth_google_signup_fields` | `{}` | `column => claim` for new users (`{"name": "name"}`). |
+| `auth_google_hosted_domains` | `[]` | Allowed Google Workspace domains (empty = any account). |
 | `setup_completed`, `framework` | - | Written by the setup wizard. |
 
 ## The SQLite store
@@ -102,6 +121,8 @@ Edited in the GUI's **Settings** area (one page per topic: API behaviour, Authen
 | `api_keys` | Key name, prefix, **SHA-256 hash**, role, timestamps, revocation |
 | `admin_users` | Usernames and `password_hash()` hashes |
 | `login_attempts` | Failed logins for throttling (pruned after 24 h) |
+| `auth_sessions` | User login sessions and refresh tokens (**SHA-256 hashes**), user id, role, claims, IP, expiry, revocation |
+| `auth_attempts` | Failed user logins per IP / hashed identity (pruned after 24 h) |
 | `cache` | Schema cache |
 
 ### Export / import

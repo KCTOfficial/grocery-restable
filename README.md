@@ -59,6 +59,9 @@ GET /api/storage/avatars/users/42/me.png
   **orphan file cleanup** with a trash (GUI, `spark` command, daily housekeeping).
 - **Security**: API keys (`anon` / `service_role` like Supabase), JWT (HS256/384/512), per-role permissions,
   **row-level security** with `scope()`, CORS, CSRF-protected admin, encrypted secrets at rest, parameterized SQL only.
+- **User login** on your own users table: password login (argon2id / bcrypt, legacy hash migration, brute force
+  protection) and **Sign in with Google**, with JWT + rotating refresh tokens or revocable sessions, and hooks to
+  customize claims, roles and checks (`/auth/login`, `/auth/google`, `gr.auth.login()`).
 - **Validation** with CodeIgniter rule strings (`required|valid_email|max_length[50]`), unique fields, typed
   input checks, password hashing field type.
 - **Callbacks** (`callback_before_insert`, `callback_after_update`, `callback_column`, `callback_upload`, …),
@@ -134,7 +137,7 @@ read directly on GitHub:
 | [JavaScript SDK](docs/src/content/docs/javascript-sdk.md) | Use the API from browsers and Node.js |
 | [REST API reference](docs/src/content/docs/rest-api.md) | Endpoints, query syntax, responses, errors |
 | [Uploads & storage](docs/src/content/docs/uploads-and-storage.md) | Field uploads, S3 style buckets, orphan file cleanup |
-| [Authentication & permissions](docs/src/content/docs/authentication.md) | API keys, JWT, roles, row-level security |
+| [Authentication & permissions](docs/src/content/docs/authentication.md) | API keys, JWT, user login (password, Google), roles, row-level security |
 | [Validation](docs/src/content/docs/validation.md) | Rules, unique, types |
 | [Callbacks, actions & RPC](docs/src/content/docs/callbacks-actions-rpc.md) | Hooks and custom endpoints |
 | [OpenAPI](docs/src/content/docs/openapi.md) | openapi.json and `_schema` |

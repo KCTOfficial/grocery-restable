@@ -79,7 +79,7 @@ never mix:
 | **API** | Which tables are endpoints and how: fields, relations, permissions, uploads, default filters, plus API keys, docs and console. | *All tables*, the list of endpoints (with source dot, disabled / problem markers), **New** endpoint, and API keys · API docs · Console at the bottom. |
 | **Storage** | Buckets and their files. | The list of buckets, **New** bucket. |
 | **Logs** | JSON logs of API requests and admin actions: counters, entries per hour, filters, live view, download, delete. | One entry per day with its size, *Clean up*, *Logging settings*. |
-| **Settings** | Advanced configuration, one page per topic, each with its own *Save*. | My account, General, Database connections, Admin users, API behaviour, Authentication, Rate limiting, CORS, Uploads, Logging, Export / Import. |
+| **Settings** | Advanced configuration, one page per topic, each with its own *Save*. | My account, General, Database connections, Admin users, API behaviour, Authentication, User login, Rate limiting, CORS, Uploads, Logging, Export / Import. |
 
 Every sidebar has a filter box. Common behaviour:
 

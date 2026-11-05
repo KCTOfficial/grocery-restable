@@ -47,6 +47,23 @@ gr.beforeSend = (url, init) => { /* change url / init, or return { url, init } *
 gr.afterSend = (response, data) => data;
 ```
 
+## User login
+
+When user login is enabled on the server (Settings > User login):
+
+```js
+import GroceryRestable, { LocalAuthStore } from '@kctofficial/grocery-restable';
+
+const gr = new GroceryRestable(baseUrl, { apiKey: 'gr_anon', authStore: new LocalAuthStore() });
+
+await gr.auth.login('jane@example.com', 'secret');               // POST /auth/login
+await gr.auth.loginWithGoogle({ idToken: response.credential });  // POST /auth/google (or { code })
+gr.auth.user;                                                     // the signed in user
+await gr.auth.logout();                                           // { all: true } = every device
+```
+
+Expired access tokens are renewed automatically with the refresh token (one request for parallel calls).
+
 ## Collections (resources)
 
 | Method | Request |

@@ -11,11 +11,11 @@ use GroceryRestable\Store\ConfigStore;
 use GroceryRestable\Support\Jwt;
 
 /**
- * Resolves the caller from API keys / JWT bearer tokens and checks permissions.
+ * Resolves the caller from API keys / JWT bearer tokens / user sessions and checks permissions.
  *
  * Credentials are read from (in order):
  *   - "apikey" or "X-API-Key" header
- *   - "Authorization: Bearer <api key | jwt>"
+ *   - "Authorization: Bearer <api key "gr_" | session "grs_" | jwt>"
  *   - "?apikey=" query parameter (only when allow_query_apikey is enabled)
  */
 final class Authenticator
@@ -43,6 +43,15 @@ final class Authenticator
         }
         if ($apiKey === null && $bearer === null && $this->store->setting('allow_query_apikey')) {
             $apiKey = $request->queryParam('apikey');
+        }
+
+        // Opaque user session token issued by /auth (session strategy).
+        if ($bearer !== null && str_starts_with($bearer, 'grs_')) {
+            if (! in_array($mode, ['jwt', 'any'], true)) {
+                throw ApiException::unauthorized('User token authentication is disabled.');
+            }
+
+            return $this->fromSession($bearer);
         }
 
         // Supabase style: "apikey" identifies the project, "Authorization: Bearer <jwt>" the user.
@@ -127,6 +136,23 @@ final class Authenticator
         }
 
         return new AuthContext($role, 'jwt', $claims);
+    }
+
+    /**
+     * Resolve an opaque session token (issued by /auth with the "session" strategy).
+     */
+    public function fromSession(string $token): AuthContext
+    {
+        $session = $this->store->findAuthSession($token, 'session');
+        if ($session === null) {
+            throw ApiException::unauthorized('Invalid or expired session.');
+        }
+        $role = (string) $session['role'];
+        if ($role === AuthContext::SERVICE_ROLE && ! $this->store->setting('jwt_allow_service_role', false)) {
+            throw ApiException::unauthorized('Sessions cannot grant the service_role role.');
+        }
+
+        return new AuthContext($role, 'session', $session['claims'] + ['sub' => $session['user_id'], 'sid' => $session['id']]);
     }
 
     /**

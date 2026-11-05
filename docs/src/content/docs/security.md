@@ -123,6 +123,19 @@ missing value (`where('owner_id', $auth->userId())` without a `sub`) match no ro
 Only the configured HMAC algorithm is accepted, `exp` is required (`jwt_require_exp`), time claims must be numbers,
 and a token cannot grant `service_role` unless `jwt_allow_service_role` is on.
 
+## User login
+
+- Passwords are hashed with argon2id (or bcrypt / argon2i) in standard `password_hash()` formats and rehashed when the
+  settings get stronger; legacy digests are verify-only and opt-in.
+- Unknown users and wrong passwords answer the same `401` in the same time; failures are throttled per account and
+  per IP.
+- Refresh tokens and session tokens are 256-bit random values stored as SHA-256 hashes; refresh tokens are single use
+  with reuse detection. Answers carry `Cache-Control: no-store`.
+- Google ID tokens are verified locally (signature, issuer, audience, expiry, optional Workspace domain); accounts are
+  linked by email only when Google reports it verified. See the caution in
+  [Authentication](authentication.md#google-sign-in) if your app registers users without verifying emails.
+- Request bodies (passwords, tokens) are never logged.
+
 ## Logs
 
 API requests and admin actions are written as JSON lines, one file per day (see [Logging](logging.md)). Request

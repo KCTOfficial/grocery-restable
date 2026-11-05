@@ -210,6 +210,40 @@ final class AdminTest extends TestCase
         self::assertSame(1, $deleted['data']['affected']);
     }
 
+    public function testUserLoginSettingsAreValidated(): void
+    {
+        $this->runSetup();
+        $this->login();
+
+        [$status, $error] = $this->xhr('settings.save', ['settings' => ['auth_password_enabled' => true, 'auth_users_table' => 'nope']]);
+        self::assertSame(422, $status);
+        self::assertArrayHasKey('auth_users_table', $error['error']['details']['fields']);
+        self::assertSame(422, $this->xhr('settings.save', ['settings' => ['auth_password_enabled' => true, 'auth_users_table' => 'employees', 'auth_users_id_column' => 'employeeNumber', 'auth_users_identity_columns' => 'email, login']])[0]);
+        self::assertSame(422, $this->xhr('settings.save', ['settings' => ['auth_password_algorithm' => 'md5']])[0]);
+        self::assertSame(422, $this->xhr('settings.save', ['settings' => ['auth_google_enabled' => true, 'auth_google_client_ids' => '']])[0]);
+
+        [$status, $saved] = $this->xhr('settings.save', ['settings' => [
+            'auth_password_enabled' => 'true', 'auth_users_table' => 'employees', 'auth_users_id_column' => 'employeeNumber',
+            'auth_users_identity_columns' => 'email', 'auth_password_legacy' => ['md5', 'rot13'], 'auth_access_ttl' => '5',
+            'auth_google_client_secret' => 'g-secret', 'auth_google_signup_fields' => 'lastName=family_name, firstName = given_name',
+        ]]);
+        self::assertSame(200, $status, json_encode($saved));
+        $s = $saved['data'];
+        self::assertSame([true, ['email'], ['md5'], 60], [$s['auth_password_enabled'], $s['auth_users_identity_columns'], $s['auth_password_legacy'], $s['auth_access_ttl']]);
+        self::assertSame(['lastName' => 'family_name', 'firstName' => 'given_name'], $s['auth_google_signup_fields']);
+        self::assertTrue($s['auth_google_client_secret_set']);
+        self::assertArrayNotHasKey('auth_google_client_secret', $s);
+        self::assertTrue($s['jwt_secret_set'], 'A JWT secret is generated for the jwt strategy');
+        self::assertSame('g-secret', $this->api->store()->setting('auth_google_client_secret'));
+        self::assertStringStartsWith('"enc:v1:', (string) $this->api->store()->pdo()->query("SELECT value FROM settings WHERE key = 'auth_google_client_secret'")->fetchColumn(), 'Encrypted at rest');
+
+        // empty secret keeps the stored one; other settings pages are not blocked by the users table
+        $this->xhr('settings.save', ['settings' => ['auth_google_client_secret' => '']]);
+        self::assertSame('g-secret', $this->api->store()->setting('auth_google_client_secret'));
+        self::assertSame(200, $this->xhr('settings.save', ['settings' => ['max_limit' => '40']])[0]);
+        self::assertNotEmpty(array_filter($this->xhr('bootstrap')[1]['data']['warnings'] ?? [], static fn (string $w): bool => str_contains($w, 'User login')));
+    }
+
     public function testSettingsKeysUsersAndExport(): void
     {
         $this->runSetup();

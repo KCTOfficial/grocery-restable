@@ -37,6 +37,8 @@ final class ResourceWriter
         private readonly UploadService $uploads,
         private readonly ConfigStore $store,
         private readonly int $maxBulkRows = 1000,
+        /** Hashes "password" fields; defaults to password_hash() with PASSWORD_DEFAULT. */
+        private readonly ?\Closure $passwordHasher = null,
     ) {
     }
 
@@ -575,7 +577,7 @@ final class ResourceWriter
 
         foreach ($columns as $field => $value) {
             if (($resource->getFieldType($field)['type'] ?? null) === 'password' && is_string($value)) {
-                $columns[$field] = password_hash($value, PASSWORD_DEFAULT);
+                $columns[$field] = $this->passwordHasher !== null ? ($this->passwordHasher)($value) : password_hash($value, PASSWORD_DEFAULT);
             }
         }
 

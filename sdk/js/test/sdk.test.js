@@ -147,3 +147,79 @@ test('auth store reads the token payload and expiry', () => {
     gr.clearToken();
     assert.equal(gr.authStore.isValid, false);
 });
+
+const jwt = (claims) => 'h.' + Buffer.from(JSON.stringify(claims)).toString('base64url') + '.s';
+
+test('auth.login stores the tokens and sends no stale token', async () => {
+    const tokens = { access_token: jwt({ sub: '1', exp: Math.floor(Date.now() / 1000) + 900 }), refresh_token: 'grr_1', user: { id: 1 } };
+    const { calls, fetch } = stub({ body: tokens }, { body: [] });
+    const gr = new GroceryRestable('http://x/api', { apiKey: 'gr_anon', token: 'stale', fetch });
+
+    assert.deepEqual(await gr.auth.login('jane@example.com', 'secret'), tokens);
+    assert.equal(calls[0].url.pathname, '/api/auth/login');
+    assert.deepEqual(JSON.parse(calls[0].init.body), { identity: 'jane@example.com', password: 'secret' });
+    assert.equal(calls[0].init.headers.Authorization, undefined);
+    assert.equal(gr.authStore.refreshToken, 'grr_1');
+    assert.deepEqual(gr.auth.user, { id: 1 });
+
+    await gr.collection('notes').getList();
+    assert.equal(calls[1].init.headers.Authorization, 'Bearer ' + tokens.access_token);
+});
+
+test('expired access tokens are refreshed once, before the request', async () => {
+    const fresh = { access_token: jwt({ exp: Math.floor(Date.now() / 1000) + 900 }), refresh_token: 'grr_2', user: { id: 1 } };
+    const { calls, fetch } = stub({ body: fresh }, { body: [] }, { body: [] });
+    const gr = new GroceryRestable('http://x/api', { fetch });
+    gr.authStore.save(jwt({ exp: 1 }), { refreshToken: 'grr_1' });
+
+    await Promise.all([gr.collection('a').getList(), gr.collection('b').getList()]);
+    assert.equal(calls.filter((c) => c.url.pathname === '/api/auth/refresh').length, 1, 'parallel requests share one refresh');
+    assert.deepEqual(JSON.parse(calls[0].init.body), { refresh_token: 'grr_1' });
+    assert.equal(gr.authStore.refreshToken, 'grr_2');
+    assert.equal(calls[1].init.headers.Authorization, 'Bearer ' + fresh.access_token);
+});
+
+test('a 401 is retried after a refresh, a failed refresh signs out', async () => {
+    const fresh = { access_token: jwt({ exp: Math.floor(Date.now() / 1000) + 900 }), refresh_token: 'grr_2', user: {} };
+    const { calls, fetch } = stub({ status: 401, body: { error: { code: 'unauthorized' } } }, { body: fresh }, { body: [{ id: 1 }] });
+    const gr = new GroceryRestable('http://x/api', { fetch });
+    gr.authStore.save(jwt({ exp: Math.floor(Date.now() / 1000) + 900 }), { refreshToken: 'grr_1' });
+    assert.deepEqual((await gr.collection('a').getList()).items, [{ id: 1 }]);
+    assert.equal(calls.length, 3);
+
+    const failing = stub({ status: 401, body: {} }, { status: 401, body: { error: { code: 'invalid_refresh_token' } } });
+    const gr2 = new GroceryRestable('http://x/api', { fetch: failing.fetch });
+    gr2.authStore.save(jwt({ exp: Math.floor(Date.now() / 1000) + 900 }), { refreshToken: 'grr_1' });
+    await assert.rejects(gr2.collection('a').getList(), (e) => e.status === 401);
+    assert.equal(gr2.authStore.token, '');
+});
+
+test('loginWithGoogle and logout', async () => {
+    const { calls, fetch } = stub({ body: { access_token: 'grs_abc', user: { id: 2 } } }, { status: 204 });
+    const gr = new GroceryRestable('http://x/api', { fetch });
+    await gr.auth.loginWithGoogle({ idToken: 'google.id.token' });
+    assert.deepEqual(JSON.parse(calls[0].init.body), { id_token: 'google.id.token' });
+    assert.equal(gr.authStore.token, 'grs_abc');
+    assert.ok(gr.authStore.isValid, 'session tokens have no exp');
+
+    await gr.auth.logout({ all: true });
+    assert.equal(calls[1].url.pathname, '/api/auth/logout');
+    assert.equal(calls[1].init.headers.Authorization, 'Bearer grs_abc');
+    assert.deepEqual(JSON.parse(calls[1].init.body), { all: true });
+    assert.equal(gr.authStore.token, '');
+});
+
+test('LocalAuthStore persists tokens', async () => {
+    const data = new Map();
+    globalThis.localStorage = { getItem: (k) => data.get(k) ?? null, setItem: (k, v) => data.set(k, v), removeItem: (k) => data.delete(k) };
+    try {
+        const { LocalAuthStore } = await import('../src/grocery-restable.js');
+        new LocalAuthStore().save('t1', { refreshToken: 'grr_1', user: { id: 1 } });
+        const again = new LocalAuthStore();
+        assert.deepEqual([again.token, again.refreshToken, again.user], ['t1', 'grr_1', { id: 1 }]);
+        again.clear();
+        assert.equal(data.size, 0);
+    } finally {
+        delete globalThis.localStorage;
+    }
+});

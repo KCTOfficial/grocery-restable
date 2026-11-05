@@ -88,8 +88,58 @@ final class OpenApiGenerator
         if ($functions !== []) {
             $spec['tags'][] = ['name' => 'rpc', 'description' => 'Remote procedures'];
         }
+        if (! empty($settings['auth_password_enabled']) || ! empty($settings['auth_google_enabled'])) {
+            $this->addAuth($spec, $settings);
+        }
 
         return $spec;
+    }
+
+    /**
+     * User login endpoints (/auth).
+     *
+     * @param array<string, mixed> $spec
+     * @param array<string, mixed> $settings
+     */
+    private function addAuth(array &$spec, array $settings): void
+    {
+        $error = ['$ref' => '#/components/responses/Error'];
+        $json = static fn (array $properties, array $required = []): array => ['required' => true, 'content' => ['application/json' => ['schema' => array_filter(
+            ['type' => 'object', 'properties' => $properties, 'required' => $required ?: null],
+            static fn (mixed $v): bool => $v !== null,
+        )]]];
+        $tokens = ['description' => 'Signed in', 'content' => ['application/json' => ['schema' => ['$ref' => '#/components/schemas/AuthTokens']]]];
+        $public = ['security' => [new \stdClass()]]; // no credentials needed
+
+        $spec['tags'][] = ['name' => 'auth', 'description' => 'User login'];
+        $spec['components']['schemas']['AuthTokens'] = ['type' => 'object', 'properties' => [
+            'token_type' => ['type' => 'string', 'const' => 'Bearer'],
+            'access_token' => ['type' => 'string', 'description' => 'Send as "Authorization: Bearer <token>"'],
+            'expires_in' => ['type' => 'integer'],
+            'expires_at' => ['type' => 'integer', 'description' => 'Unix time'],
+            'refresh_token' => ['type' => 'string', 'description' => 'JWT strategy only. Single use: every refresh returns a new one.'],
+            'refresh_expires_at' => ['type' => 'integer'],
+            'user' => ['type' => 'object'],
+        ]];
+
+        $spec['paths']['/auth'] = ['get' => ['tags' => ['auth'], 'summary' => 'Sign-in methods', 'operationId' => 'auth_methods', 'responses' => ['200' => ['description' => 'Methods']]] + $public];
+        if (! empty($settings['auth_password_enabled'])) {
+            $spec['paths']['/auth/login'] = ['post' => ['tags' => ['auth'], 'summary' => 'Sign in with a password', 'operationId' => 'auth_login',
+                'requestBody' => $json(['identity' => ['type' => 'string', 'description' => implode(', ', (array) ($settings['auth_users_identity_columns'] ?? []))], 'password' => ['type' => 'string', 'format' => 'password']], ['identity', 'password']),
+                'responses' => ['200' => $tokens, '401' => $error, '429' => $error, 'default' => $error]] + $public];
+        }
+        if (! empty($settings['auth_google_enabled'])) {
+            $spec['paths']['/auth/google'] = ['post' => ['tags' => ['auth'], 'summary' => 'Sign in with Google (ID token or authorization code)', 'operationId' => 'auth_google',
+                'requestBody' => $json(['id_token' => ['type' => 'string'], 'code' => ['type' => 'string'], 'redirect_uri' => ['type' => 'string'], 'code_verifier' => ['type' => 'string']]),
+                'responses' => ['200' => $tokens, '401' => $error, '403' => $error, 'default' => $error]] + $public];
+        }
+        $spec['paths']['/auth/refresh'] = ['post' => ['tags' => ['auth'], 'summary' => 'New access token from a refresh token', 'operationId' => 'auth_refresh',
+            'requestBody' => $json(['refresh_token' => ['type' => 'string']], ['refresh_token']), 'responses' => ['200' => $tokens, '401' => $error, 'default' => $error]] + $public];
+        $spec['paths']['/auth/logout'] = ['post' => ['tags' => ['auth'], 'summary' => 'End the session (all: every session of the user)', 'operationId' => 'auth_logout',
+            'requestBody' => ['content' => ['application/json' => ['schema' => ['type' => 'object', 'properties' => ['refresh_token' => ['type' => 'string'], 'all' => ['type' => 'boolean']]]]]],
+            'responses' => ['204' => ['description' => 'Signed out'], 'default' => $error]]];
+        $spec['paths']['/auth/me'] = ['get' => ['tags' => ['auth'], 'summary' => 'The signed in user', 'operationId' => 'auth_me',
+            'responses' => ['200' => ['description' => 'User', 'content' => ['application/json' => ['schema' => ['type' => 'object']]]], 'default' => $error]]];
     }
 
     /**

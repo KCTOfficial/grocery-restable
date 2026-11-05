@@ -20,6 +20,10 @@ export interface SendOptions {
     signal?: AbortSignal;
     as?: 'json' | 'blob' | 'text';
     raw?: boolean;
+    /** Do not send the user token. */
+    noToken?: boolean;
+    /** Do not renew an expired access token before the request. */
+    noRefresh?: boolean;
 }
 
 export interface ListOptions extends Omit<SendOptions, 'query'> {
@@ -52,11 +56,47 @@ export class GroceryRestableError extends Error {
 
 export class AuthStore {
     token: string;
+    refreshToken: string;
+    user: Row | null;
     readonly isValid: boolean;
     readonly payload: Record<string, any> | null;
-    save(token: string): void;
+    save(token: string, extra?: { refreshToken?: string; user?: Row | null }): void;
     clear(): void;
-    onChange(listener: (token: string) => void): () => void;
+    onChange(listener: (token: string, user: Row | null) => void): () => void;
+}
+
+/** Auth store persisted in localStorage and shared by the tabs of the same origin. */
+export class LocalAuthStore extends AuthStore {
+    constructor(key?: string);
+    readonly storageKey: string;
+}
+
+export interface AuthResponse<U = Row> {
+    token_type: 'Bearer';
+    access_token: string;
+    expires_in: number;
+    expires_at: number;
+    /** "jwt" strategy only */
+    refresh_token?: string;
+    refresh_expires_at?: number;
+    user: U;
+}
+
+export interface AuthMethods {
+    password: false | { identity: string[] };
+    google: false | { client_id: string };
+    strategy: 'jwt' | 'session';
+}
+
+export class AuthService<U = Row> {
+    readonly user: U | null;
+    readonly isSignedIn: boolean;
+    methods(options?: SendOptions): Promise<AuthMethods>;
+    login(identity: string, password: string, options?: SendOptions): Promise<AuthResponse<U>>;
+    loginWithGoogle(params: { idToken?: string; credential?: string; code?: string; redirectUri?: string; codeVerifier?: string }, options?: SendOptions): Promise<AuthResponse<U>>;
+    refresh(options?: SendOptions): Promise<AuthResponse<U>>;
+    logout(options?: SendOptions & { all?: boolean }): Promise<true>;
+    me(options?: SendOptions): Promise<U>;
 }
 
 export class CollectionService<T = Row> {
@@ -139,6 +179,8 @@ export default class GroceryRestable {
     baseUrl: string;
     apiKey: string;
     authStore: AuthStore;
+    /** User login (/auth). */
+    auth: AuthService;
     beforeSend: ((url: string, init: RequestInit) => void | { url?: string; init?: RequestInit } | Promise<void | { url?: string; init?: RequestInit }>) | null;
     afterSend: ((response: Response, data: any) => any) | null;
     collection<T = Row>(name: string): CollectionService<T>;
@@ -151,6 +193,7 @@ export default class GroceryRestable {
     clearToken(): this;
     buildUrl(path: string, query?: Record<string, string | number> | Array<[string, string]>): string;
     send<R = any>(path: string, options?: SendOptions): Promise<R>;
+    tokenFresh(): boolean;
 }
 
 export { GroceryRestable };

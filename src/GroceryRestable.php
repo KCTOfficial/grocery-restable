@@ -9,6 +9,7 @@ use GroceryRestable\Admin\NativeSession;
 use GroceryRestable\Admin\SessionInterface;
 use GroceryRestable\Auth\AuthContext;
 use GroceryRestable\Auth\Authenticator;
+use GroceryRestable\Auth\UserAuth;
 use GroceryRestable\Database\ConnectionInterface;
 use GroceryRestable\Database\ConnectionManager;
 use GroceryRestable\Database\Schema\SchemaRepository;
@@ -44,13 +45,14 @@ use GroceryRestable\Validation\ValidatorInterface;
  */
 final class GroceryRestable
 {
-    public const VERSION = '1.1.0';
+    public const VERSION = '1.2.0';
 
     private ?ConfigStore $store = null;
     private ?ConnectionManager $connections = null;
     private ?SchemaRepository $schema = null;
     private ?ResourceRegistry $registry = null;
     private ?Authenticator $authenticator = null;
+    private ?UserAuth $userAuth = null;
     private ?ValidatorInterface $validator = null;
     private ?UploadService $uploads = null;
     private ?StorageService $storage = null;
@@ -128,6 +130,17 @@ final class GroceryRestable
         return $this->authenticator ??= new Authenticator($this->store(), (string) $this->config->get('jwtSecret', ''));
     }
 
+    /**
+     * User login for the API (/auth): password login on your users table, Google sign-in, tokens and hooks.
+     */
+    public function auth(): UserAuth
+    {
+        // Hooks are usually registered in booting() callbacks (e.g. CodeIgniter's define()): run them first.
+        $this->boot();
+
+        return $this->userAuth ??= new UserAuth($this, (string) $this->config->get('jwtSecret', ''));
+    }
+
     public function validator(): ValidatorInterface
     {
         return $this->validator ??= new Validator();
@@ -174,6 +187,7 @@ final class GroceryRestable
             $this->uploads(),
             $this->store(),
             (int) $this->config->get('maxBulkRows', 1000),
+            fn (string $password): string => $this->auth()->hashPassword($password),
         );
     }
 

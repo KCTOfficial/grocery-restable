@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.2.0 - 2026-11-05
+
+User login for the API on your own users table: password login with modern hashing and brute force protection,
+Sign in with Google, JWT or session tokens, hooks to customize the flow, and `gr.auth` in the JavaScript SDK.
+
+### Added
+
+- **User login** (`/auth`) on a table of your own database, configured in **Settings > User login**:
+  - password login (`POST /auth/login`, identity matched in several columns, optional role, active and claim columns);
+  - **Sign in with Google** (`POST /auth/google`): ID tokens verified locally (RS256 against Google's cached keys,
+    issuer, audience, expiry, Workspace domain) or authorization codes; users found by Google id, linked by verified
+    email or created on first sign-in;
+  - two token strategies: short lived **JWT + rotating refresh token** with reuse detection (`POST /auth/refresh`),
+    or opaque, instantly revocable **session tokens** (`grs_...`); `POST /auth/logout` (`all` for every device),
+    `GET /auth/me`, `GET /auth` (sign-in methods);
+  - **password hashing** with argon2id (default), argon2i or bcrypt and configurable parameters, rehash on login,
+    verify-only legacy digests (md5, sha1, sha256, sha512) to migrate old tables, custom verifier callback;
+  - brute force protection per account and per IP (`429` with `Retry-After`), equal answers and timing for unknown
+    users and wrong passwords;
+  - hooks: `$api->auth()->claims()`, `role()`, `beforeLogin()`, `afterLogin()`, `userPayload()`, `googleSignup()`,
+    `verifyLegacyPasswordUsing()`, plus `issueTokens()`, `hashPassword()` and `revokeSessions()` for custom flows;
+  - OpenAPI paths for the enabled endpoints.
+- JavaScript SDK: `gr.auth` (`login`, `loginWithGoogle`, `refresh`, `logout`, `me`, `methods`), automatic token
+  renewal (before expiry and once after a `401`), `LocalAuthStore` persisted in `localStorage`, `noToken` /
+  `noRefresh` request options.
+- `AuthContext::$method` can be `session`.
+
+### Changed
+
+- `password` field types of endpoints are hashed with the user login hashing settings (argon2id by default instead
+  of bcrypt). Existing hashes keep working with `password_verify()`.
+- Authentication mode labels: `jwt` / `any` accept "user tokens" (JWTs and user login sessions).
+
+### Upgrade notes
+
+- `auth` is now a reserved name (like `rpc` and `storage`): a code resource named `auth` throws at registration and
+  a table named `auth` is no longer auto exposed. Rename the endpoint (`$api->resource('auth_items', 'auth')`).
+- The SQLite configuration store migrates itself to schema version 4 (tables `auth_sessions`, `auth_attempts`).
+
 ## 1.1.0 - 2026-10-28
 
 A friendlier admin GUI with a PocketBase-like flow, a JavaScript SDK, UUID ids, rate limiting, JSON logs,

@@ -16,7 +16,7 @@ use GroceryRestable\Store\ConfigStore;
 final class ResourceRegistry
 {
     /** Names that cannot be used for resources because they are API routes. */
-    public const RESERVED = ['rpc', 'storage', '_schema', 'openapi'];
+    public const RESERVED = ['rpc', 'storage', '_schema', 'openapi', 'auth'];
 
     /** @var array<string, Resource> */
     private array $code = [];

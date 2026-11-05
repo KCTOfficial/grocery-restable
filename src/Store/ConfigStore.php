@@ -15,7 +15,7 @@ use PDO;
  */
 final class ConfigStore
 {
-    private const SCHEMA_VERSION = 3;
+    private const SCHEMA_VERSION = 4;
 
     /**
      * Runtime settings and their defaults.
@@ -78,12 +78,61 @@ final class ConfigStore
         'orphan_min_age_hours' => 24,
         // Cleaned files are moved to {storagePath}/trash and deleted after this many days (0 = delete immediately).
         'storage_trash_days' => 7,
+
+        // User login (/auth): users live in a table of your own database.
+        'auth_password_enabled' => false,
+        'auth_google_enabled' => false,
+        // '' = the default connection.
+        'auth_users_connection' => '',
+        'auth_users_table' => 'users',
+        'auth_users_id_column' => 'id',
+        // The login "identity" is looked up in these columns, in this order.
+        'auth_users_identity_columns' => ['email'],
+        'auth_users_password_column' => 'password',
+        // Optional: role of the user ('' = jwt_default_role), "active" flag (falsy = login refused).
+        'auth_users_role_column' => '',
+        'auth_users_active_column' => '',
+        // Columns copied into the token claims (e.g. tenant_id for scope()).
+        'auth_users_claim_columns' => [],
+        // Columns never returned by /auth (the password column never is).
+        'auth_users_hidden_columns' => [],
+        // jwt: short lived JWT + rotating refresh token | session: opaque, revocable server side session token.
+        'auth_token_strategy' => 'jwt',
+        'auth_access_ttl' => 900,
+        // Lifetime of a refresh token / session.
+        'auth_session_ttl' => 2592000,
+        // Password hashing (new hashes and rehash on login).
+        'auth_password_algorithm' => 'argon2id',
+        'auth_password_cost' => 12,
+        'auth_password_memory' => 65536,
+        'auth_password_time' => 4,
+        // Verify-only legacy digests (md5, sha1, sha256, sha512), upgraded on the next successful login.
+        'auth_password_legacy' => [],
+        'auth_password_rehash' => true,
+        // Brute force protection: failed logins per account / per IP within the window (seconds).
+        'auth_max_attempts' => 5,
+        'auth_max_attempts_ip' => 20,
+        'auth_attempts_window' => 900,
+        // Google sign-in: OAuth client ids accepted as audience (web, Android, iOS).
+        'auth_google_client_ids' => [],
+        // Only needed to exchange authorization codes.
+        'auth_google_client_secret' => '',
+        'auth_google_id_column' => 'google_id',
+        'auth_google_email_column' => 'email',
+        // Link a Google account to an existing user with the same (verified) email.
+        'auth_google_link_by_email' => true,
+        // Create a user on the first Google sign-in.
+        'auth_google_signup' => false,
+        // column => Google claim for new users, e.g. {"name": "name", "avatar": "picture"}
+        'auth_google_signup_fields' => [],
+        // Restrict to Google Workspace domains (hd claim). Empty = any account.
+        'auth_google_hosted_domains' => [],
     ];
 
     /**
      * Settings that are encrypted at rest and never returned to the GUI in clear text.
      */
-    public const SECRET_SETTINGS = ['jwt_secret'];
+    public const SECRET_SETTINGS = ['jwt_secret', 'auth_google_client_secret'];
 
     private ?PDO $pdo = null;
 
@@ -486,6 +535,214 @@ final class ConfigStore
     }
 
     // ------------------------------------------------------------------
+    // User sessions (/auth): opaque session tokens and JWT refresh tokens
+    // ------------------------------------------------------------------
+
+    /**
+     * Start a session. Only the SHA-256 hash of the token is stored.
+     *
+     * @param string $kind "session" (the token is the bearer token) or "refresh" (the token renews JWTs)
+     * @param array<string, mixed> $claims
+     * @return array{id: string, token: string, expires_at: int}
+     */
+    public function createAuthSession(string $kind, string $userId, string $role, array $claims, string $provider, int $ttl, string $ip = '', string $userAgent = ''): array
+    {
+        $id = bin2hex(random_bytes(16));
+        $token = self::authToken($kind);
+        $now = time();
+        $expires = $now + max(60, $ttl);
+        $this->pdo()->prepare(
+            'INSERT INTO auth_sessions (id, kind, token_hash, user_id, role, claims, provider, ip, user_agent, created_at, last_used_at, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        )->execute([$id, $kind, hash('sha256', $token), $userId, $role, json_encode($claims, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE),
+            $provider, mb_substr($ip, 0, 64), mb_substr($userAgent, 0, 200), $now, $now, $expires]);
+        if (random_int(1, 50) === 1) {
+            $this->pdo()->prepare('DELETE FROM auth_sessions WHERE expires_at < ? OR revoked_at < ?')->execute([$now - 86400, $now - 86400]);
+        }
+
+        return ['id' => $id, 'token' => $token, 'expires_at' => $expires];
+    }
+
+    /**
+     * Active session of a token of the given kind (claims decoded), or null.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function findAuthSession(string $token, string $kind = 'session'): ?array
+    {
+        $statement = $this->pdo()->prepare('SELECT * FROM auth_sessions WHERE token_hash = ? AND kind = ? AND revoked_at IS NULL AND expires_at > ?');
+        $statement->execute([hash('sha256', $token), $kind, time()]);
+        $row = $statement->fetch();
+        if (! $row) {
+            return null;
+        }
+        if ($row['last_used_at'] === null || (int) $row['last_used_at'] < time() - 60) {
+            $this->pdo()->prepare('UPDATE auth_sessions SET last_used_at = ? WHERE id = ?')->execute([time(), $row['id']]);
+        }
+
+        return self::sessionRow($row);
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    public function authSession(string $id): ?array
+    {
+        $statement = $this->pdo()->prepare('SELECT * FROM auth_sessions WHERE id = ?');
+        $statement->execute([$id]);
+        $row = $statement->fetch();
+
+        return $row ? self::sessionRow($row) : null;
+    }
+
+    /**
+     * Rotate a refresh token: the presented token is replaced by a new one.
+     *
+     * Presenting an already rotated token within $leeway seconds (two tabs refreshing at once) yields another
+     * new token; later it is treated as stolen and the whole session is revoked (refresh token reuse detection).
+     *
+     * @return array{session: array<string, mixed>, token: string}|null
+     */
+    public function rotateAuthSession(string $token, int $leeway = 10): ?array
+    {
+        $hash = hash('sha256', $token);
+        $now = time();
+        $pdo = $this->pdo();
+        $find = $pdo->prepare('SELECT * FROM auth_sessions WHERE kind = ? AND (token_hash = ? OR previous_hash = ?)');
+        $find->execute(['refresh', $hash, $hash]);
+        $row = $find->fetch();
+        if (! $row || $row['revoked_at'] !== null || (int) $row['expires_at'] <= $now) {
+            return null;
+        }
+
+        $new = self::authToken('refresh');
+        if (hash_equals($row['token_hash'], $hash)) {
+            $update = $pdo->prepare('UPDATE auth_sessions SET previous_hash = token_hash, token_hash = ?, rotated_at = ?, last_used_at = ? WHERE id = ? AND token_hash = ?');
+            $update->execute([hash('sha256', $new), $now, $now, $row['id'], $hash]);
+            if ($update->rowCount() === 1) {
+                return ['session' => self::sessionRow($row), 'token' => $new];
+            }
+            // Another request rotated it in the meantime: apply the "previous token" rules to the fresh row.
+            $find->execute(['refresh', $hash, $hash]);
+            $row = $find->fetch();
+            if (! $row || $row['revoked_at'] !== null) {
+                return null;
+            }
+        }
+
+        if ($row['rotated_at'] !== null && $now - (int) $row['rotated_at'] <= $leeway) {
+            $pdo->prepare('UPDATE auth_sessions SET token_hash = ?, rotated_at = ?, last_used_at = ? WHERE id = ?')
+                ->execute([hash('sha256', $new), $now, $now, $row['id']]);
+
+            return ['session' => self::sessionRow($row), 'token' => $new];
+        }
+
+        $this->revokeAuthSession((string) $row['id']);
+
+        return null;
+    }
+
+    /**
+     * Refresh the role and claims of a session (after the user row was read again).
+     *
+     * @param array<string, mixed> $claims
+     */
+    public function updateAuthSession(string $id, string $role, array $claims): void
+    {
+        $this->pdo()->prepare('UPDATE auth_sessions SET role = ?, claims = ? WHERE id = ?')
+            ->execute([$role, json_encode($claims, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE), $id]);
+    }
+
+    public function revokeAuthSession(string $id): void
+    {
+        $this->pdo()->prepare('UPDATE auth_sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL')->execute([time(), $id]);
+    }
+
+    /**
+     * Sign a user out everywhere (e.g. after a password change). Returns the number of revoked sessions.
+     */
+    public function revokeUserAuthSessions(string $userId): int
+    {
+        $statement = $this->pdo()->prepare('UPDATE auth_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL');
+        $statement->execute([time(), $userId]);
+
+        return $statement->rowCount();
+    }
+
+    /**
+     * Active sessions, newest first (without token hashes).
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function authSessions(?string $userId = null, int $limit = 200): array
+    {
+        $sql = 'SELECT id, kind, user_id, role, provider, ip, user_agent, created_at, last_used_at, expires_at FROM auth_sessions
+                WHERE revoked_at IS NULL AND expires_at > ?';
+        $bindings = [time()];
+        if ($userId !== null) {
+            $sql .= ' AND user_id = ?';
+            $bindings[] = $userId;
+        }
+        $statement = $this->pdo()->prepare($sql . ' ORDER BY created_at DESC LIMIT ' . max(1, $limit));
+        $statement->execute($bindings);
+
+        return $statement->fetchAll();
+    }
+
+    /**
+     * Count a failed login for each key ("ip:..." and "id:<hash>").
+     *
+     * @param list<string> $keys
+     */
+    public function recordAuthFailure(array $keys): void
+    {
+        $now = time();
+        $insert = $this->pdo()->prepare('INSERT INTO auth_attempts (key, attempted_at) VALUES (?, ?)');
+        foreach ($keys as $key) {
+            $insert->execute([$key, $now]);
+        }
+        if (random_int(1, 50) === 1) {
+            $this->pdo()->prepare('DELETE FROM auth_attempts WHERE attempted_at < ?')->execute([$now - 86400]);
+        }
+    }
+
+    /**
+     * Failed logins of $key within the window and the seconds until the oldest one leaves it.
+     *
+     * @return array{count: int, retry_after: int}
+     */
+    public function authFailures(string $key, int $window): array
+    {
+        $statement = $this->pdo()->prepare('SELECT COUNT(*) AS n, MIN(attempted_at) AS oldest FROM auth_attempts WHERE key = ? AND attempted_at > ?');
+        $statement->execute([$key, time() - $window]);
+        $row = $statement->fetch() ?: ['n' => 0, 'oldest' => null];
+
+        return ['count' => (int) $row['n'], 'retry_after' => $row['oldest'] !== null ? max(1, (int) $row['oldest'] + $window - time()) : 0];
+    }
+
+    public function clearAuthFailures(string $key): void
+    {
+        $this->pdo()->prepare('DELETE FROM auth_attempts WHERE key = ?')->execute([$key]);
+    }
+
+    private static function authToken(string $kind): string
+    {
+        return ($kind === 'refresh' ? 'grr_' : 'grs_') . bin2hex(random_bytes(32));
+    }
+
+    /**
+     * @param array<string, mixed> $row
+     * @return array<string, mixed>
+     */
+    private static function sessionRow(array $row): array
+    {
+        unset($row['token_hash'], $row['previous_hash']);
+        $row['claims'] = json_decode((string) $row['claims'], true) ?: [];
+
+        return $row;
+    }
+
+    // ------------------------------------------------------------------
     // Storage object index (S3 style metadata of bucket files)
     // ------------------------------------------------------------------
 
@@ -712,6 +969,15 @@ final class ConfigStore
                 original_name TEXT, cache_control TEXT, metadata TEXT, owner TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                 PRIMARY KEY (bucket, path)
             );
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                id TEXT PRIMARY KEY, kind TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, previous_hash TEXT,
+                user_id TEXT NOT NULL, role TEXT NOT NULL, claims TEXT NOT NULL, provider TEXT NOT NULL, ip TEXT, user_agent TEXT,
+                created_at INTEGER NOT NULL, rotated_at INTEGER, last_used_at INTEGER, expires_at INTEGER NOT NULL, revoked_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS auth_sessions_user ON auth_sessions (user_id);
+            CREATE INDEX IF NOT EXISTS auth_sessions_previous ON auth_sessions (previous_hash);
+            CREATE TABLE IF NOT EXISTS auth_attempts (key TEXT NOT NULL, attempted_at INTEGER NOT NULL);
+            CREATE INDEX IF NOT EXISTS auth_attempts_key ON auth_attempts (key, attempted_at);
             SQL);
         $this->pdo->exec('PRAGMA user_version = ' . self::SCHEMA_VERSION);
     }

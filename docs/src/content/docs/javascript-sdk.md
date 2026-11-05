@@ -35,7 +35,8 @@ TypeScript definitions are included (`sdk/js/index.d.ts`).
 ```js
 const gr = new GroceryRestable(baseUrl, {
     apiKey: 'gr_...',      // "apikey" header. In browsers: the anon key, never service_role
-    token: 'eyJ...',       // optional user JWT ("Authorization: Bearer")
+    token: 'eyJ...',       // optional user token ("Authorization: Bearer"), see User login
+    authStore: new LocalAuthStore(),   // optional: persist the login (default: in memory)
     headers: {},           // extra headers for every request
 });
 
@@ -48,6 +49,46 @@ gr.clearToken();
 gr.beforeSend = (url, init) => { /* change the request, or return { url, init } */ };
 gr.afterSend = (response, data) => data;
 ```
+
+## User login
+
+With [user login](authentication.md#user-login) enabled, `gr.auth` signs users in and keeps their tokens in the auth
+store. Every request then runs as that user; with the JWT strategy an expired access token is renewed before the
+request (and a `401` is retried once after a refresh). Parallel requests share one refresh.
+
+```js
+import GroceryRestable, { LocalAuthStore } from 'https://example.com/api/sdk.js';
+
+// LocalAuthStore keeps the session across reloads and tabs (localStorage); the default AuthStore is in memory.
+const gr = new GroceryRestable('https://example.com/api', { apiKey: 'gr_anon_key', authStore: new LocalAuthStore() });
+
+const methods = await gr.auth.methods();                   // { password, google: { client_id }, strategy }
+const { user } = await gr.auth.login('jane@example.com', 'secret');
+
+// Sign in with Google: the ID token ("credential") of the button / One Tap, or of a mobile SDK
+google.accounts.id.initialize({
+    client_id: methods.google.client_id,
+    callback: (response) => gr.auth.loginWithGoogle({ idToken: response.credential }),
+});
+// ... or the popup authorization code flow
+// google.accounts.oauth2.initCodeClient({ client_id, scope: 'openid email profile', ux_mode: 'popup',
+//     callback: ({ code }) => gr.auth.loginWithGoogle({ code }) }).requestCode();
+
+gr.auth.user;                       // the signed in user (password and hidden columns removed)
+gr.auth.isSignedIn;
+await gr.auth.me();                 // read the user again
+await gr.auth.refresh();            // renew now (normally automatic)
+await gr.auth.logout();             // this device
+await gr.auth.logout({ all: true }); // every device
+
+gr.authStore.onChange((token, user) => render(user));
+```
+
+Errors: `invalid_credentials` (401), `too_many_attempts` (429, see `error.details.retry_after`), `account_disabled`,
+`account_not_found`, `email_not_verified` (403).
+
+> Tokens in `localStorage` can be read by any script running on the page. Keep a strict Content-Security-Policy and
+> no untrusted third-party scripts, or keep the default in-memory store and sign in again after a reload.
 
 ## Collections
 

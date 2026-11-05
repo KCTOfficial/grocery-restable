@@ -14,8 +14,8 @@ final class AuthContext
     public const ANON = 'anon';
 
     /**
-     * @param string $method anonymous | api_key | jwt | internal
-     * @param array<string, mixed> $claims JWT claims (empty for API keys)
+     * @param string $method anonymous | api_key | jwt | session | internal
+     * @param array<string, mixed> $claims JWT / session claims (empty for API keys)
      */
     public function __construct(
         public readonly string $role,
@@ -54,7 +54,7 @@ final class AuthContext
     }
 
     /**
-     * Subject of the JWT ("sub" claim), typically the user id.
+     * Subject of the JWT or session ("sub" claim), typically the user id.
      */
     public function userId(): mixed
     {
