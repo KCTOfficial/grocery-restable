@@ -45,7 +45,7 @@ use GroceryRestable\Validation\ValidatorInterface;
  */
 final class GroceryRestable
 {
-    public const VERSION = '1.2.0';
+    public const VERSION = '1.2.1';
 
     private ?ConfigStore $store = null;
     private ?ConnectionManager $connections = null;

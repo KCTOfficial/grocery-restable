@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/images/icon-text-nobg.png" alt="Grocery Restable" width="480">
+</p>
+
 # Grocery Restable
 
 **Turn any MySQL / MariaDB, PostgreSQL or SQLite database into a secure REST API in minutes** - the
@@ -117,6 +121,16 @@ curl "http://localhost:8080/api/employees?select=*&limit=5" -H "apikey: <service
 ```
 
 See **[CodeIgniter 4](docs/src/content/docs/codeigniter4.md)**. Without a framework: **[No framework](docs/src/content/docs/no-framework.md)**.
+
+## Examples
+
+Two ready-to-run example projects, each with a step-by-step README (setup, REST API and SDK examples, user login
+demo, troubleshooting):
+
+| Example | |
+|---|---|
+| [grocery-restable-example-native](https://github.com/KCTOfficial/grocery-restable-example-native) | Plain PHP, no framework |
+| [grocery-restable-example-codeigniter4](https://github.com/KCTOfficial/grocery-restable-example-codeigniter4) | CodeIgniter 4 application |
 
 ## Documentation
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.1 - 2026-11-06
+
+### Changed
+
+- README: project logo in the header and an **Examples** section linking the ready-to-run example projects
+  ([plain PHP](https://github.com/KCTOfficial/grocery-restable-example-native) and
+  [CodeIgniter 4](https://github.com/KCTOfficial/grocery-restable-example-codeigniter4)).
+
 ## 1.2.0 - 2026-11-05
 
 User login for the API on your own users table: password login with modern hashing and brute force protection,
